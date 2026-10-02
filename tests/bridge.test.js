@@ -1,0 +1,111 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {Hub} from '../bridge.js';
+import {VERSION,actor,ledger,hash,messagePath,addEvent,resolveAttack,replay} from '../core.js';
+
+globalThis.document={getElementById:()=>null};
+function setup(){
+ const ctx={chatId:'chat-a',characterId:0,chat:[{name:'User',is_user:true,mes:'Стреляю в противника'}],chatMetadata:{voidhub:ledger()},extensionSettings:{voidhub:{enabled:true,autoSync:true,autoRoll:true,reserve:256}},maxContext:50000,getTokenCountAsync:async t=>Math.ceil(t.length/4),saveMetadata:async()=>{},saveChat:async()=>{},setExtensionPrompt:()=>{},getCharacterCardFields:()=>({}),generateRaw:async()=>'{"update":{}}'};
+ const hub=new Hub(()=>ctx);const state=ctx.chatMetadata.voidhub.base;state.player.weaponIds=['gun'];state.weapons=[{id:'gun',name:'Оружие',mode:'ranged',damage:'2d10+20',penetration:8,ammo:10,cost:1,type:'энергетический'}];state.enemies=[actor({id:'enemy',name:'Противник',armor:{chest:15}})];state.battle.active=true;
+ const path=messagePath(ctx.chat),key='turn:'+hash(path.join('|')),action={actorId:'player',targetId:'enemy',weaponId:'gun',region:'chest'};let dice=[1,4,7];const result=resolveAttack(state,action,key+':0',()=>dice.shift());
+ hub.book.rolls[key]={plan:[action],results:{[result.id]:result}};return {ctx,hub,path,key,result};
+}
+test('Regeneration reuses rolls and commits damage only once',async()=>{
+ const {ctx,hub,result}=setup();let aborted=false;await hub.beforeGeneration([],40000,()=>aborted=true,'normal');assert.equal(aborted,false);assert.equal(hub.state().enemies[0].hp,76);
+ await hub.beforeGeneration([],40000,()=>aborted=true,'regenerate');assert.equal(hub.state().enemies[0].hp,76);assert.equal(hub.state().weapons[0].ammo,9);assert.equal(ctx.chat[0].extra.voidhub.reports.length,1);assert.ok(ctx.chat[0].extra.voidhub.reports[0].includes('100 → 76'));
+});
+test('Fatal damage still has a report on regeneration',async()=>{
+ const {hub,key,result}=setup();hub.book.base.enemies[0].hp=20;const fatal={...result,damage:24,hpBefore:20,hpAfter:0};hub.book.rolls[key].results[result.id]=fatal;
+ await hub.beforeGeneration([],40000,()=>{},'normal');await hub.beforeGeneration([],40000,()=>{},'regenerate');assert.equal(hub.state().enemies[0].hp,0);assert.equal(hub.context().chat[0].extra.voidhub.reports.length,1);
+});
+test('Edited action rolls back prior damage',async()=>{
+ const {ctx,hub}=setup();await hub.beforeGeneration([],40000,()=>{},'normal');ctx.chat[0].mes='Разговариваю';assert.equal(hub.state().enemies[0].hp,100);assert.equal(hub.state().weapons[0].ammo,10);
+});
+test('Manual mode aborts narration before a roll, then approval proceeds',async()=>{
+ const {ctx,hub}=setup();ctx.extensionSettings.voidhub.autoRoll=false;let aborted=false;await hub.beforeGeneration([],40000,()=>aborted=true,'normal');assert.ok(aborted);assert.ok(hub.pending);assert.equal(hub.state().enemies[0].hp,100);
+ ctx.chat[0].extra.voidhub.approved=true;await hub.beforeGeneration([],40000,()=>{},'normal');assert.equal(hub.state().enemies[0].hp,76);
+});
+test('Insufficient context aborts without cutting records or committing damage',async()=>{
+ const {ctx,hub}=setup();const original=JSON.stringify(hub.book.base);let aborted=false;await hub.beforeGeneration([],100,()=>aborted=true,'normal');assert.ok(aborted);assert.ok(hub.error.includes('не помещается'));assert.equal(JSON.stringify(hub.book.base),original);assert.equal(hub.state().enemies[0].hp,100);
+});
+test('Main injection excludes inaccessible private channel events',()=>{
+ const {hub,path}=setup();addEvent(hub.book,path,'update',{channels:[{id:'secret',name:'Secret',participants:['a','b'],public:false,messages:[{from:'a',text:'TOP_SECRET'}]}]});addEvent(hub.book,path,'vox',{channelId:'secret',message:{id:'secret-message',from:'a',text:'MORE_SECRET'}});const prompt=hub.injection();assert.ok(!prompt.includes('TOP_SECRET'));assert.ok(!prompt.includes('MORE_SECRET'));
+});
+test('Late AI response cannot write into a different chat',async()=>{
+ const {ctx,hub}=setup();let release;ctx.generateRaw=()=>new Promise(resolve=>release=resolve);const promise=hub.sync(true);await new Promise(resolve=>setTimeout(resolve,5));ctx.chatId='chat-b';ctx.chatMetadata={voidhub:ledger()};release('{"update":{"player":{"hp":1}}}');await promise;assert.equal(hub.state().player.hp,100);
+});
+test('Story synchronization preserves cached numeric battle outcomes',async()=>{
+ const {ctx,hub}=setup();await hub.beforeGeneration([],40000,()=>{},'normal');ctx.chat.push({name:'NPC',is_user:false,mes:'Попадание'});ctx.generateRaw=async()=>'{"update":{"enemies":[{"id":"enemy","hp":1,"name":"Противник"}],"weapons":[{"id":"gun","ammo":0}]}}';await hub.sync(true);assert.equal(hub.state().enemies[0].hp,76);assert.equal(hub.state().weapons[0].ammo,9);
+});
+test('Edited button message cannot reapply stale mission acceptance',()=>{
+ const {ctx,hub}=setup();ctx.chat[0].mes='Принимаю миссию';ctx.chat[0].extra??={};ctx.chat[0].extra.voidhub??={};Object.assign(ctx.chat[0].extra.voidhub,{operation:{missions:[{id:'m',title:'Миссия',goals:[],status:'active'}]},intentSignature:hash(ctx.chat[0].mes)});
+ hub.applyOperation(ctx.chat[0]);assert.equal(hub.state().missions.length,1);ctx.chat[0].mes='Отказываюсь от миссии';hub.applyOperation(ctx.chat[0]);assert.equal(hub.state().missions.length,0);
+});
+test('Force sync can replace an earlier removal on the same branch',async()=>{
+ const {ctx,hub}=setup();ctx.generateRaw=async()=>'{"update":{},"remove":[{"collection":"enemies","id":"enemy"}]}';await hub.sync(true);assert.equal(hub.state().enemies.length,0);
+ ctx.generateRaw=async()=>'{"update":{}}';await hub.sync(true);assert.equal(hub.state().enemies.length,1);
+});
+test('Story uses profiles only for new records and preserves customized existing balance',async()=>{
+ const {ctx,hub}=setup();ctx.generateRaw=async()=>JSON.stringify({update:{enemies:[{id:'necron',name:'Некрон',species:'некрон',balanceProfile:'necron-warrior'},{id:'enemy',stats:{melee:80}}],weapons:[{id:'las',templateId:'lasgun'},{id:'gun',description:'Старая запись'}]}});
+ hub.book.base.enemies[0].stats.ranged=77;await hub.sync(true);
+ const state=hub.state(),n=state.enemies.find(a=>a.id==='necron');assert.equal(n.hp,180);assert.equal(n.naturalArmor.chest,14);assert.equal(state.enemies[0].stats.ranged,77);assert.equal(state.enemies[0].stats.melee,80);assert.equal(state.weapons.find(w=>w.id==='las').damage,'2d10+20');assert.equal(state.weapons.find(w=>w.id==='gun').damage,'2d10+20');assert.equal(state.weapons.find(w=>w.id==='gun').ammo,10);
+});
+test('A tactical round caches initiative, bleeding tick, and round counter; regeneration and editing remain safe',async()=>{
+ const {ctx,hub,key}=setup();const {effectFromTemplate}=await import('../effects.js');const {resolveInitiative,resolveRound}=await import('../tactics.js');const {applyEvent,clone}=await import('../core.js');
+ hub.book.base.player.effects=[effectFromTemplate('bleeding','blood')];hub.book.rolls[key].tacticsVersion=3;
+ const pre=clone(hub.book.base),init=resolveInitiative(pre,key+':initiative',()=>1);hub.book.rolls[key].results[init.id]=init;applyEvent(pre,{kind:'mechanic',payload:init});applyEvent(pre,{kind:'attack',payload:hub.book.rolls[key].results[key+':0']});const tick=resolveRound(pre,key+':round',()=>4);hub.book.rolls[key].results[tick.id]=tick;
+ await hub.beforeGeneration([],40000,()=>{},'normal');assert.equal(hub.state().player.hp,93);assert.equal(hub.state().battle.round,2);assert.equal(hub.state().weapons[0].ammo,9);
+ await hub.beforeGeneration([],40000,()=>{},'regenerate');assert.equal(hub.state().player.hp,93);assert.equal(hub.state().battle.round,2);assert.equal(hub.state().weapons[0].ammo,9);assert.ok(ctx.chat[0].extra.voidhub.reports.some(r=>r.includes('Следующий раунд: 2')));
+ ctx.chat[0].mes='Разговариваю';assert.equal(hub.state().player.hp,100);assert.equal(hub.state().battle.round,1);
+});
+test('Faster enemy acts before player; a fatal hit cancels even a pre-cached player attack',async()=>{
+ const {hub,key}=setup();const {resolveInitiative}=await import('../tactics.js');hub.book.base.player.hp=20;const base=hub.book.base;base.enemies[0].stats.reaction=90;base.player.stats.reaction=10;base.enemies[0].weaponIds=['gun'];
+ const reaction={actorId:'enemy',targetId:'player',weaponId:'gun',region:'chest'},enemyHit=resolveAttack(base,reaction,key+':1',()=>1);enemyHit.damage=30;enemyHit.hpAfter=0;
+ const init=resolveInitiative(base,key+':initiative',()=>1);hub.book.rolls[key].plan.push(reaction);hub.book.rolls[key].tacticsVersion=3;hub.book.rolls[key].results[enemyHit.id]=enemyHit;hub.book.rolls[key].results[init.id]=init;
+ await hub.beforeGeneration([],40000,()=>{},'normal');assert.equal(hub.state().player.hp,0);assert.equal(hub.state().enemies[0].hp,100);assert.equal(hub.state().weapons[0].ammo,9);assert.ok(hub.context().chat[0].extra.voidhub.reports.some(r=>r.includes('действие пропущено')));
+});
+test('Treatment reports in main chat are cached, spend supply once, and synchronization cannot duplicate healing',async()=>{
+ const {ctx,hub,key}=setup();const {resolveTreatment}=await import('../tactics.js');hub.book.base.battle.active=false;hub.book.base.enemies=[];hub.book.base.player.hp=40;hub.book.base.inventory=[{id:'kit',name:'Аптечка',tag:'medkit',amount:2,ownerId:'player'}];const action={kind:'heal',actorId:'player',targetId:'player',supplyId:'kit'},result=resolveTreatment(hub.book.base,action,key+':0',()=>1);hub.book.rolls[key]={plan:[action],results:{[result.id]:result},tacticsVersion:3};
+ await hub.beforeGeneration([],40000,()=>{},'normal');await hub.beforeGeneration([],40000,()=>{},'regenerate');assert.equal(hub.state().player.hp,52);assert.equal(hub.state().inventory[0].amount,1);ctx.generateRaw=async()=>JSON.stringify({update:{player:{hp:64},inventory:[{id:'kit',amount:0}]}});await hub.sync(true);assert.equal(hub.state().player.hp,52);assert.equal(hub.state().inventory[0].amount,1);
+});
+test('Ordinary dialogue does not advance the round or tick effects',async()=>{
+ const {ctx,hub,key}=setup();hub.book.rolls[key]={plan:[],results:{},tacticsVersion:3};await hub.beforeGeneration([],40000,()=>{},'normal');assert.equal(hub.state().battle.round,1);assert.equal(hub.state().enemies[0].hp,100);
+});
+test('Explicit start/round/end buttons retain their plan and need no AI action classifier',async()=>{
+ const {ctx,hub}=setup();hub.book.base.battle.active=false;ctx.chat[0].mes='Начать бой';const uid=ctx.chat[0].extra.voidhub.uid;ctx.chat[0].extra.voidhub={uid,action:{kind:'start',actorId:'player'},intentSignature:hash(ctx.chat[0].mes)};ctx.generateRaw=async()=>{throw Error('classifier should be skipped');};await hub.beforeGeneration([],40000,()=>{},'normal');assert.equal(hub.state().battle.active,true);assert.equal(hub.state().battle.order.length,2);
+ ctx.chat.push({name:'User',is_user:true,mes:'Следующий раунд',extra:{voidhub:{action:{kind:'round',actorId:'player'},intentSignature:hash('Следующий раунд')}}});await hub.beforeGeneration([],40000,()=>{},'normal');assert.equal(hub.state().battle.round,2);
+ ctx.chat.push({name:'User',is_user:true,mes:'Завершить бой',extra:{voidhub:{action:{kind:'end',actorId:'player'},intentSignature:hash('Завершить бой')}}});await hub.beforeGeneration([],40000,()=>{},'normal');assert.equal(hub.state().battle.active,false);
+});
+
+test('Campaign button skips classifier, does not need non-dice approval, and survives regeneration/editing',async()=>{
+ const {ctx,hub,key}=setup();hub.book.rolls={};hub.book.base.battle.active=false;hub.book.base.enemies=[];hub.book.base.navigation.location='А';hub.book.base.routes=[{id:'r',name:'Путь',origin:'А',destination:'Б',mode:'surface',steps:1,risk:'safe',accessGranted:true,transportConfirmed:true,conditionsConfirmed:true}];ctx.chat[0].mes='Планирую путь';ctx.chat[0].extra.voidhub={action:{kind:'journey-plan',actorId:'player',routeId:'r'},intentSignature:hash(ctx.chat[0].mes)};ctx.extensionSettings.voidhub.autoRoll=false;ctx.generateRaw=async()=>{throw Error('No classifier for campaign buttons');};
+ let aborted=false;await hub.beforeGeneration([],40000,()=>aborted=true,'normal');assert.equal(aborted,false);assert.equal(hub.state().journeys.length,1);assert.equal(hub.state().navigation.location,'А');await hub.beforeGeneration([],40000,()=>aborted=true,'regenerate');assert.equal(hub.state().journeys.length,1);assert.equal(hub.state().battle.round,1);ctx.chat[0].mes='Остаюсь';assert.equal(hub.state().journeys.length,0);
+});
+test('Written travel intent is classified and executes through the same campaign rules',async()=>{
+ const {ctx,hub}=setup();hub.book.rolls={};hub.book.base.battle.active=false;hub.book.base.enemies=[];hub.book.base.navigation.location='А';hub.book.base.routes=[{id:'r',name:'Путь',origin:'А',destination:'Б',mode:'surface',steps:1,risk:'safe'}];ctx.chat[0].mes='Планирую переход в Б';ctx.generateRaw=async()=>JSON.stringify({actions:[{kind:'journey-plan',actorId:'player',routeId:'r'}]});await hub.beforeGeneration([],40000,()=>{},'normal');assert.equal(hub.state().journeys.length,1);assert.equal(hub.state().navigation.location,'А');
+});
+test('Travel tick keeps its d100 on regeneration, advances once, and manual mode offers a roll',async()=>{
+ const {ctx,hub}=setup();const {resolveJourney}=await import('../campaign.js');hub.book.rolls={};const s=hub.book.base;s.battle.active=false;s.enemies=[];s.navigation.location='А';s.routes=[{id:'r',name:'Путь',origin:'А',destination:'Б',mode:'surface',steps:2,risk:'safe',accessGranted:true,transportConfirmed:true,conditionsConfirmed:true}];let p=resolveJourney(s,{kind:'journey-plan',routeId:'r'},'p');const {applyEvent}=await import('../core.js');applyEvent(s,{kind:'mechanic',payload:p});applyEvent(s,{kind:'mechanic',payload:resolveJourney(s,{kind:'journey-depart'},'d')});ctx.chat[0].mes='Продолжаю путь';ctx.chat[0].extra.voidhub={action:{kind:'journey-advance',actorId:'player',journeyId:s.navigation.journeyId},intentSignature:hash(ctx.chat[0].mes)};ctx.extensionSettings.voidhub.autoRoll=false;let aborted=false;await hub.beforeGeneration([],40000,()=>aborted=true,'normal');assert.equal(aborted,true);assert.equal(hub.state().journeys[0].progress,0);const k=ctx.chat[0].extra.voidhub.turnKey;hub.book.rolls[k].results[k+':0']=resolveJourney(s,hub.book.rolls[k].plan[0],k+':0',()=>99);ctx.chat[0].extra.voidhub.approved=true;await hub.beforeGeneration([],40000,()=>{},'normal');await hub.beforeGeneration([],40000,()=>{},'regenerate');assert.equal(hub.state().journeys[0].progress,1);assert.equal(hub.book.rolls[k].results[k+':0'].roll,99);assert.equal(hub.state().battle.round,1);
+});
+test('Campaign conditions are rechecked after a context abort without rerolling',async()=>{
+ const {ctx,hub}=setup();const {resolveJourney}=await import('../campaign.js');hub.book.rolls={};const s=hub.book.base;s.battle.active=false;s.enemies=[];s.navigation.location='А';s.routes=[{id:'r',name:'Путь',origin:'А',destination:'Б',mode:'surface',steps:1,risk:'safe',accessGranted:true,transportConfirmed:true,conditionsConfirmed:true}];const {applyEvent}=await import('../core.js');applyEvent(s,{kind:'mechanic',payload:resolveJourney(s,{kind:'journey-plan',routeId:'r'},'p')});ctx.chat[0].mes='Отправляюсь';ctx.chat[0].extra.voidhub={action:{kind:'journey-depart',actorId:'player',journeyId:s.navigation.journeyId},intentSignature:hash(ctx.chat[0].mes)};await hub.beforeGeneration([],100,()=>{},'normal');assert.equal(hub.state().navigation.location,'А');hub.update({routes:[{...s.routes[0],accessGranted:false}]});await hub.beforeGeneration([],40000,()=>{},'regenerate');assert.equal(hub.state().navigation.location,'А');assert.match(hub.error,/Доступ/);
+});
+test('Vox selected participant gets own location and memories; private and pending knowledge never leaks into main injection',async()=>{
+ const {ctx,hub,path}=setup();hub.book.base.squad=[actor({id:'a',name:'A',location:'Далеко'}),actor({id:'b',name:'B'})];hub.book.base.channels=[{id:'c',name:'Связь',participants:['player','a','b'],public:false,messages:[]}];hub.book.base.memories=[{id:'secret',ownerId:'a',text:'PRIVATE_A_ONLY',confirmed:true,sharedWith:[]},{id:'pending',ownerId:'a',text:'PENDING_A',confirmed:false,sharedWith:[]}];addEvent(hub.book,path,'update',{memories:[{id:'eventsecret',ownerId:'a',text:'PRIVATE_EVENT',confirmed:true,sharedWith:[]}]});assert.ok(!hub.injection().includes('PRIVATE_A_ONLY'));assert.ok(!hub.injection().includes('PRIVATE_EVENT'));let prompt='';ctx.generateRaw=async value=>{prompt=value.prompt;return '{"text":"Ответ B"}';};await hub.vox('c','Вопрос','b');assert.ok(!prompt.includes('PRIVATE_A_ONLY'));assert.ok(!prompt.includes('PENDING_A'));assert.ok(!prompt.includes('Стреляю в противника'));assert.equal(hub.state().channels[0].messages.length,2);assert.equal(hub.state().memories.filter(m=>m.source==='vox').length,6);assert.ok(hub.injection().includes('Вопрос'));await assert.rejects(()=>hub.vox('c','Нет','enemy'),/участником/);
+});
+test('Narrative can confirm a pending career request in its immediate reply without double applying',async()=>{
+ const {ctx,hub}=setup();hub.book.rolls={};const s=hub.book.base;s.battle.active=false;s.enemies=[];s.player.affiliation='Астра Милитарум';s.player.rank='Гвардеец';s.squad=[actor({id:'officer',name:'Офицер',affiliation:'Астра Милитарум',permissions:['appoint']})];ctx.chat[0].mes='Прошу повышение';ctx.chat[0].extra.voidhub={action:{kind:'career-request',actorId:'player',type:'promotion',reason:'Отличился',newRank:'Сержант',authorityId:'officer'},intentSignature:hash(ctx.chat[0].mes)};await hub.beforeGeneration([],40000,()=>{},'normal');assert.equal(hub.state().player.rank,'Гвардеец');const ev=hub.state().careerEvents[0];ctx.chat.push({name:'Офицер',is_user:false,mes:'Приказом назначаю вас сержантом.'});ctx.generateRaw=async()=>JSON.stringify({update:{careerEvents:[{id:ev.id,status:'confirmed',sourceIndex:1,evidence:'Приказом назначаю вас сержантом.'}]}});await hub.sync(true);assert.equal(hub.state().player.rank,'Сержант');await hub.sync(true);assert.equal(hub.state().careerEvents.length,1);assert.equal(hub.state().player.rank,'Сержант');assert.equal(JSON.parse(hub.export()).version,VERSION);
+});
+
+test('Supply button charges once on regeneration and story cannot duplicate receipts, spend currency again, or create another item',async()=>{
+ const {ctx,hub}=setup();hub.book.rolls={};const s=hub.book.base;s.battle.active=false;s.enemies=[];s.resources=[{id:'money',name:'Ресурс',value:100}];s.offers=[{id:'o',name:'Комплект',method:'purchase',collection:'inventory',item:{name:'Комплект',tag:'medkit',amount:1},stock:2,price:10,resourceId:'money',confirmed:true,accessGranted:true}];ctx.chat[0].mes='Покупаю комплект';ctx.chat[0].extra.voidhub={action:{kind:'equipment-acquire',actorId:'player',offerId:'o',quantity:1},intentSignature:hash(ctx.chat[0].mes)};ctx.extensionSettings.voidhub.autoRoll=false;ctx.generateRaw=async()=>{throw Error('No classifier');};let aborted=false;await hub.beforeGeneration([],40000,()=>aborted=true,'normal');assert.equal(aborted,false);await hub.beforeGeneration([],40000,()=>aborted=true,'regenerate');assert.equal(hub.state().resources[0].value,90);assert.equal(hub.state().inventory.length,1);assert.equal(hub.state().transactions.length,1);const item=hub.state().inventory[0];ctx.chat.push({name:'NPC',is_user:false,mes:'Комплект передан за 10 единиц ресурса.'});ctx.generateRaw=async()=>JSON.stringify({update:{resources:[{id:'money',value:80}],inventory:[{id:item.id,amount:9},{id:'duplicated',name:'Комплект',amount:1}],offers:[{id:'o',stock:0,sourceIndex:1,evidence:'Комплект передан за 10 единиц ресурса.'}],transactions:[{id:'fake'}]}});await hub.sync(true);assert.equal(hub.state().resources[0].value,90);assert.equal(hub.state().inventory.length,1);assert.equal(hub.state().inventory[0].amount,1);assert.equal(hub.state().offers[0].stock,1);assert.equal(hub.state().transactions.length,1);
+});
+test('Classifier cannot authorize mission completion by inventing authorConfirmed; actual button review can',async()=>{
+ const {ctx,hub}=setup();hub.book.rolls={};hub.book.base.battle.active=false;hub.book.base.enemies=[];hub.book.base.missions=[{id:'m',title:'Миссия',status:'active',goals:[]}];ctx.chat[0].mes='Завершаю миссию';ctx.generateRaw=async()=>JSON.stringify({actions:[{kind:'mission-resolve',actorId:'player',missionId:'m',status:'completed',outcome:'Успех',evidence:'Я решил',authorConfirmed:true}]});let aborted=false;await hub.beforeGeneration([],40000,()=>aborted=true,'normal');assert.equal(aborted,true);assert.equal(hub.state().missions[0].status,'active');ctx.chat.push({name:'User',is_user:true,mes:'Подтверждаю результат по истории',extra:{voidhub:{action:{kind:'mission-resolve',actorId:'player',missionId:'m',status:'completed',outcome:'Успех',evidence:'Данные действительно доставлены',authorConfirmed:true},intentSignature:hash('Подтверждаю результат по истории')}}});await hub.beforeGeneration([],40000,()=>{},'normal');assert.equal(hub.state().missions[0].status,'completed');await hub.beforeGeneration([],40000,()=>{},'regenerate');assert.equal(hub.state().missions[0].status,'completed');
+});
+test('Main journal hides unknown threats and nested unconfirmed relationship proposals',()=>{
+ const {hub,path}=setup();hub.book.base.squad=[actor({id:'a',name:'A'})];addEvent(hub.book,path,'update',{threats:[{id:'hidden',name:'SECRET_THREAT',confirmed:true,knownIds:['a'],affectedIds:['a']}],relationships:[{id:'rel',npcId:'a',trust:10,confirmed:true,pending:{trust:99,reason:'UNCONFIRMED_FEELINGS'}}]});const prompt=hub.injection();assert.ok(!prompt.includes('SECRET_THREAT'));assert.ok(!prompt.includes('UNCONFIRMED_FEELINGS'));assert.ok(prompt.includes('"trust":10'));
+});
+test('An edited supply button cannot execute stale acquisition intent',async()=>{
+ const {ctx,hub}=setup();hub.book.rolls={};hub.book.base.battle.active=false;hub.book.base.enemies=[];ctx.chat[0].mes='Не покупаю';ctx.chat[0].extra.voidhub={action:{kind:'equipment-acquire',actorId:'player',offerId:'missing'},intentSignature:hash('Покупаю')};ctx.generateRaw=async()=>'{"actions":[]}';await hub.beforeGeneration([],40000,()=>{},'normal');assert.equal(hub.state().transactions.length,0);
+});

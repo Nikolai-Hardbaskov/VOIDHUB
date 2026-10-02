@@ -1,0 +1,12 @@
+{
+  "display_name": "VOIDHUB",
+  "loading_order": 150,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "VOIDHUB project",
+  "version": "0.5.1",
+  "generate_interceptor": "voidhubBeforeGeneration",
+  "homePage": ""
+}
