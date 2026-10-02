@@ -5,6 +5,7 @@ import {SPECIES,PROFILES} from './presets.js';
 import {ABILITY_TEMPLATES,abilityFromTemplate,canUseAbility,availableSupply,participants,reportFor} from './tactics.js';
 import {EFFECT_TEMPLATES,effectFromTemplate,physiologyOf} from './effects.js';
 import {CREATURE_PROFILES,WEAPON_TEMPLATES,ARMOR_TEMPLATES,profilesFor,applyCreatureProfile,weaponFromTemplate,armorFromTemplate,damageRange} from './balance.js';
+import {validateProfile} from './onboarding.js';
 
 const TITLES={briefing:'Сводка',missions:'Миссии',vox:'Вокс',navigation:'Навигация',profile:'Досье',battle:'Бой',squad:'Отряд',arsenal:'Арсенал',archive:'Архив',settings:'Настройки'};
 export const escapeHTML=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -23,6 +24,7 @@ export class UI {
   const root=document.createElement('section');root.id='voidhub-window';root.hidden=true;root.setAttribute('role','dialog');root.setAttribute('aria-label','VOIDHUB');root.setAttribute('aria-modal','true');
   root.innerHTML=`<div class="vh-shell"><header class="vh-header"><button class="vh-brand" type="button" data-action="tab" data-tab="profile" aria-label="Открыть досье">${icon('skull')} VOIDHUB</button><div class="vh-header-tools">${button(icon('rotate'),'sync','','vh-icon')}<button type="button" class="vh-button vh-icon" data-action="close" aria-label="Закрыть VOIDHUB">${icon('xmark')}</button></div></header><div class="vh-subhead"><span id="vh-tab-title">Сводка</span><span id="vh-sync-state" role="status"></span></div><div class="vh-content" id="vh-content"></div><div id="vh-status" class="vh-status" role="status" hidden></div><div id="vh-more" class="vh-more" hidden>${['profile','battle','squad','arsenal','archive','settings'].map(t=>button(TITLES[t],'tab',`data-tab="${t}"`)).join('')}</div><nav class="vh-nav" aria-label="Разделы VOIDHUB">${[['briefing','satellite-dish'],['missions','scroll'],['vox','tower-broadcast'],['navigation','compass']].map(([t,i])=>button(`${icon(i)}<span>${TITLES[t]}</span>`,'tab',`data-tab="${t}"`)).join('')}${button(`${icon('ellipsis')}<span>Ещё</span>`,'more','aria-expanded="false"')}</nav></div>`;
   document.body.append(root);this.root=root;this.content=root.querySelector('#vh-content');
+  const creationFooter=document.createElement('footer');creationFooter.className='vh-creation-footer';creationFooter.hidden=true;creationFooter.innerHTML='<button type="submit" form="vh-player-form" class="vh-button">Создать персонажа</button>';root.querySelector('.vh-shell').insertBefore(creationFooter,root.querySelector('#vh-more'));
   root.addEventListener('click',event=>{const control=event.target.closest('[data-action]');if(control&&root.contains(control))void this.action(control.dataset.action,control.dataset).catch(error=>this.hub.fail(error));});
   root.addEventListener('submit',event=>{event.preventDefault();void this.submit(event.target).catch(error=>this.hub.fail(error));});
   root.addEventListener('change',event=>this.changed(event.target));
@@ -37,18 +39,30 @@ export class UI {
   root.querySelector('[data-action=sync]').setAttribute('aria-label','Синхронизировать с основным чатом');
   this.render();
  }
- open(){this.returnFocus=document.activeElement;this.root.hidden=false;this.opened=true;this.render();this.root.querySelector('.vh-brand').focus();}
+ open(){this.returnFocus=document.activeElement;this.hub.startProfile();this.root.hidden=false;this.opened=true;this.render();(this.root.querySelector('[name=name]')||this.root.querySelector('.vh-brand')).focus();}
  close(){this.root.hidden=true;this.opened=false;this.returnFocus?.focus?.();}
- switch(tab){this.scroll[this.tab]=this.content.scrollTop;this.tab=tab;this.editor=null;this.root.querySelector('#vh-more').hidden=true;this.render();}
+ switch(tab){if(!this.hub.profileReady()){this.render();return;}this.scroll[this.tab]=this.content.scrollTop;this.tab=tab;this.editor=null;this.root.querySelector('#vh-more').hidden=true;this.render();}
  render(){
   if(!this.root)return;
+  const identity=this.hub.ready()?this.hub.identity():null;
+  if(identity!==this.chatIdentity){this.chatIdentity=identity;this.editor=null;this.traits=[];this.scroll={};}
+  const creating=this.hub.ready()&&!this.hub.profileReady();
+  this.root.classList.toggle('vh-creating',creating);
+  this.root.querySelector('.vh-creation-footer').hidden=!creating;
+  this.root.querySelector('.vh-nav').hidden=creating||!this.hub.ready();
+  this.root.querySelector('[data-action=sync]').hidden=creating||!this.hub.ready();
+  this.root.querySelector('.vh-brand').disabled=creating;
+  if(creating){
+   this.root.querySelector('#vh-more').hidden=true;
+   if(!this.editor?.onboarding){const record=clone(this.hub.state().player);if(record.name==='{{user}}')record.name=this.hub.context().name1||'';this.editor={type:'player',record,onboarding:true,force:true};this.traits=[...record.traits];this.scroll[this.tab]=0;}
+  }else if(this.editor?.onboarding)this.editor=null;
+  this.root.querySelector('#vh-tab-title').textContent=creating?'Создание персонажа':TITLES[this.tab];
   const focused=this.root.contains(document.activeElement)?document.activeElement:null;
   // Keep unsaved editor inputs intact while background state updates.
   if(this.editor&&this.content.querySelector('form')&&!this.editor.force){this.status();this.chatReports();return;}
   if(this.editor)this.editor.force=false;
   const oldScroll=this.scroll[this.tab]??0;
   this.root.style.setProperty('--vh-font-size',`${this.hub.settings.fontSize||16}px`);
-  this.root.querySelector('#vh-tab-title').textContent=TITLES[this.tab];
   this.root.querySelectorAll('.vh-nav [data-tab]').forEach(b=>b.setAttribute('aria-current',b.dataset.tab===this.tab?'page':'false'));
   this.root.querySelector('.vh-nav [data-action=more]').setAttribute('aria-current',['briefing','missions','vox','navigation'].includes(this.tab)?'false':'page');
   if(!this.hub.ready()){this.content.innerHTML=empty('Откройте чат SillyTavern, чтобы создать или продолжить кампанию VOIDHUB.');this.status();return;}
@@ -60,7 +74,7 @@ export class UI {
  }
  status(){
   const element=this.root.querySelector('#vh-status');element.hidden=!this.hub.error;element.textContent=this.hub.error;
-  this.root.querySelector('#vh-sync-state').textContent=this.hub.syncing?'Синхронизация…':this.busy?'Обработка…':this.hub.settings.enabled?'Связь с чатом':'Связь отключена';
+  this.root.querySelector('#vh-sync-state').textContent=this.root.classList.contains('vh-creating')?'Заполните анкету':this.hub.syncing?'Синхронизация…':this.busy?'Обработка…':this.hub.settings.enabled?'Связь с чатом':'Связь отключена';
  }
  chatReports(){
   const chat=this.hub.context().chat||[];
@@ -104,13 +118,17 @@ export class UI {
  }
  settingsHTML(){const s=this.hub.settings;return `<form data-form="settings"><label class="vh-check"><input type="checkbox" name="enabled" ${s.enabled?'checked':''}>Передавать контекст VOIDHUB</label><label class="vh-check"><input type="checkbox" name="autoSync" ${s.autoSync?'checked':''}>Обновлять состояние по ответам ИИ</label><label class="vh-check"><input type="checkbox" name="autoRoll" ${s.autoRoll?'checked':''}>Выполнять броски автоматически</label>${field('Размер основного текста','fontSize',s.fontSize,'number')}${field('Резерв контекста для инструкций и ответа','reserve',s.reserve,'number')}<p class="vh-meta">Передаётся полное состояние и весь журнал активной ветки. При переполнении запрос останавливается. Автоматический разбор использует дополнительные запросы к выбранной модели SillyTavern.</p><button type="submit" class="vh-button">Сохранить настройки</button></form><div class="vh-toolbar">${button('Экспорт кампании','export')}${button('Импорт кампании','import')}</div><input id="vh-import-file" type="file" accept="application/json,.json" hidden><p class="vh-meta">VOIDHUB ${VERSION} · прототип расширения</p>`;}
  profilePicker(label,key,values,current){const preset=values.includes(current)?current:'__custom__';return `<label class="vh-field">${label}<select name="${key}" data-profile-picker="${key}">${options(values,preset)}</select></label><label class="vh-field vh-own" data-own="${key}" ${preset==='__custom__'?'':'hidden'}>Свой вариант<input name="${key}Own" value="${preset==='__custom__'?e(current):''}" ${preset==='__custom__'?'':'disabled'}></label>`;}
+ playerEditorHTML(s,p,creating){
+  const config=PROFILES[p.species]||PROFILES.__custom__,origin=p.origin==='Не указано'?'':p.origin,background=p.background==='Не указано'?'':p.background;
+  const identity=`<label class="vh-field">Имя персонажа<input type="text" name="name" value="${e(p.name)}" required maxlength="120" autocomplete="off"></label>${this.profilePicker('Раса / тип существа','species',SPECIES,p.species)}${this.profilePicker('Принадлежность','affiliation',['',...config.affiliations],p.affiliation)}${this.profilePicker('Роль','role',['',...config.roles],p.role)}${this.profilePicker('Происхождение · место','origin',['',...config.origins],origin)}${this.profilePicker('Происхождение · среда / прошлое','background',['',...config.backgrounds],background)}<label class="vh-field">Особенности · можно выбрать несколько<select id="vh-trait-picker"><option value="">Выберите особенность</option>${Object.entries(config.traits).map(([group,values])=>`<optgroup label="${e(group)}">${options(values,'',false)}</optgroup>`).join('')}<option value="__custom__">Свой вариант</option></select></label><label class="vh-field" id="vh-trait-own-wrap" hidden>Своя особенность<input id="vh-trait-own" disabled></label>${button('Добавить особенность','addTrait')}<div id="vh-chosen-traits">${this.traitHTML()}</div><label class="vh-check"><input type="checkbox" name="noTraits" ${!creating&&!p.traits.length?'checked':''}>Без особых особенностей</label>`;
+  const numbers=`${this.creatureControls(p)}<div class="vh-fields">${field('Здоровье','hp',p.hp,'number')}${field('Максимум здоровья','maxHp',p.maxHp,'number')}</div>${field('Состояние','status',p.status)}<h3>Характеристики</h3><div class="vh-fields">${Object.entries(STAT_NAMES).map(([key,label])=>field(label,key,p.stats[key],'number')).join('')}</div>`;
+  const body=creating?'':`${this.actorTacticalEditor(p,s)}<details class="vh-record"><summary>Повреждения и защита</summary><h3>Ранения</h3>${p.wounds.map(w=>`<p>${e(p.anatomy[w.region]||'Область тела')}: ${e(w.name)} · ${e(w.severity)} · ${w.treated?'обработано':'не обработано'}</p>`).join('')||empty('Ранений нет.')}<h3>Эффекты</h3>${this.effectsHTML(p)||empty('Эффектов нет.')}<p class="vh-meta">Лечение и изменение эффектов доступны в досье.</p><h3>Названия областей тела</h3>${Object.entries(p.anatomy).map(([id,label])=>field('Область тела','anatomy-label-'+id,label)).join('')}${this.protectionEditor(p)}<h3>Доступное оружие</h3>${s.weapons.map(w=>`<label class="vh-check"><input type="checkbox" name="weapon-${e(w.id)}" value="${e(w.id)}" ${p.weaponIds.includes(w.id)?'checked':''}>${e(w.name)}</label>`).join('')||empty('Оружие добавляется в арсенале.')}</details><details class="vh-record"><summary>Карьера и полномочия</summary>${field('Звание / ранг','rank',p.rank)}${field('Должность','position',p.position)}${area('Полномочия, по одному в строке','permissions',p.permissions.join('\n'))}${area('Обязательства','obligations',p.obligations)}</details>`;
+  return `<form id="vh-player-form" data-form="player"><h3>${creating?'Создайте своего персонажа':'Анкета персонажа'}</h3>${creating?'<p class="vh-meta">Заполните анкету. После сохранения откроются миссии, вокс и остальные разделы VOIDHUB.</p>':''}${identity}<details><summary>Начальная ситуация · необязательно</summary>${area('Начало новой истории','start',p.start)}</details><details class="vh-record"><summary>${creating?'Стартовые характеристики · необязательно':'Боевой профиль и характеристики'}</summary>${numbers}</details>${body}${creating?`<div class="vh-toolbar">${button('Импортировать кампанию','import')}</div><input id="vh-import-file" type="file" accept="application/json,.json" hidden>`:this.formButtons()}</form>`;
+ }
  editorHTML(s){const ed=this.editor,r=ed.record||{};
   const world=this.worldEditor(s);if(world!==null)return world;
   const campaign=this.campaignEditor(s);if(campaign!==null)return campaign;
-  if(ed.type==='player'){
-   const p=r,config=PROFILES[p.species]||PROFILES.__custom__;
-   return `<form data-form="player"><h3>Анкета и состояние {{user}}</h3>${this.profilePicker('Раса / тип существа','species',SPECIES,p.species)}${this.creatureControls(p)}${this.profilePicker('Принадлежность','affiliation',['',...config.affiliations],p.affiliation)}${this.profilePicker('Роль','role',['',...config.roles],p.role)}${this.profilePicker('Происхождение · место','origin',['Не указано',...config.origins],p.origin)}${this.profilePicker('Происхождение · среда / прошлое','background',['Не указано',...config.backgrounds],p.background)}<label class="vh-field">Особенности<select id="vh-trait-picker"><option value="">Выберите особенность</option>${Object.entries(config.traits).map(([group,values])=>`<optgroup label="${e(group)}">${options(values,'',false)}</optgroup>`).join('')}<option value="__custom__">Свой вариант</option></select></label><label class="vh-field" id="vh-trait-own-wrap" hidden>Своя особенность<input id="vh-trait-own" disabled></label>${button('Добавить особенность','addTrait')}<div id="vh-chosen-traits">${this.traitHTML()}</div><details><summary>Начальная ситуация · необязательно</summary>${area('Начало новой истории','start',p.start)}</details><div class="vh-fields">${field('Здоровье','hp',p.hp,'number')}${field('Максимум здоровья','maxHp',p.maxHp,'number')}</div>${field('Состояние','status',p.status)}${this.actorTacticalEditor(p,s)}<h3>Характеристики</h3><div class="vh-fields">${Object.entries(STAT_NAMES).map(([key,label])=>field(label,key,p.stats[key],'number')).join('')}</div><details><summary>Карьера и полномочия</summary>${field('Звание / ранг','rank',p.rank)}${field('Должность','position',p.position)}${area('Полномочия, по одному в строке','permissions',p.permissions.join('\n'))}${area('Обязательства','obligations',p.obligations)}</details><details><summary>Повреждения, эффекты и анатомия</summary>${area('Ранения — JSON','wounds',JSON.stringify(p.wounds,null,2),5)}${area('Эффекты — JSON','effects',JSON.stringify(p.effects,null,2),4)}${area('Области тела — JSON','anatomy',JSON.stringify(p.anatomy,null,2),5)}${this.protectionEditor(p)}${area('ID доступного оружия, по одному в строке','weaponIds',p.weaponIds.join('\n'))}</details>${this.formButtons()}</form>`;
-  }
+  if(ed.type==='player')return this.playerEditorHTML(s,r,ed.onboarding===true);
   if(ed.type==='attack'){
    const weapons=s.weapons.filter(w=>s.player.weaponIds.includes(w.id));
    return `<form data-form="attack"><h3>Атака: ${e(r.name)}</h3>${weapons.length?`<label class="vh-field">Оружие<select name="weaponId">${weapons.map(w=>`<option value="${e(w.id)}">${e(w.name)} · ${e(w.damage)}</option>`).join('')}</select></label><label class="vh-field">Область<select name="region"><option value="">Обычная атака</option>${Object.entries(r.anatomy).map(([id,label])=>`<option value="${e(id)}">${e(label)} · штраф −20</option>`).join('')}</select></label><label class="vh-check"><input name="aim" type="checkbox">Прицеливание +10</label><label class="vh-check"><input name="cover" type="checkbox">Цель в укрытии −20</label><label class="vh-check"><input name="wound" type="checkbox">Мешающее ранение −10</label>${this.formButtons('Атаковать')}`:empty('Назначьте {{user}} оружие в арсенале или досье.')+button('Назад','cancelEdit')}</form>`;
@@ -139,10 +157,11 @@ export class UI {
  templateControls(collection,r){const templates=collection==='weapons'?WEAPON_TEMPLATES:ARMOR_TEMPLATES;return `<details class="vh-record" open><summary>Образцы ${collection==='weapons'?'оружия':'брони'} 40к</summary><label class="vh-field">Выберите образец<select name="templateChoice"><option value="">Свой вариант</option>${templates.map(t=>`<option value="${e(t.id)}" ${t.id===r.templateId?'selected':''}>${e(t.name)} · ${collection==='weapons'?e(t.damage)+' / пробитие '+t.penetration:'защита '+t.protection}</option>`).join('')}</select></label>${button('Применить образец','applyTemplate',`data-collection="${collection}"`)}<p class="vh-meta">Заполняет поля формы; можно изменить перед сохранением. Для существующего оружия текущий боезапас сохраняется. Выбирайте размер, носитель и доступность по истории.</p></details>`;}
  applyCreatureDraft(){
   const form=this.content.querySelector('form'),data=Object.fromEntries(new FormData(form)),species=data.species==='__custom__'?data.speciesOwn.trim():data.species;
-  const draft={...this.editor.record,species,hp:Number(data.hp),maxHp:Number(data.maxHp),anatomy:JSON.parse(data.anatomy)},next=applyCreatureProfile(draft,data.balanceProfile);
+  const anatomy=data.anatomy?JSON.parse(data.anatomy):Object.fromEntries(Object.entries(this.editor.record.anatomy).map(([id,label])=>[id,data['anatomy-label-'+id]??label]));
+  const draft={...this.editor.record,species,hp:Number(data.hp),maxHp:Number(data.maxHp),anatomy},next=applyCreatureProfile(draft,data.balanceProfile);
   for(const k of ['hp','maxHp'])form.elements[k].value=next[k];for(const [k,v] of Object.entries(next.stats))form.elements[k].value=v;
   for(const [k,v] of Object.entries(next.naturalArmor))if(form.elements['natural-'+k])form.elements['natural-'+k].value=v;
-  this.editor.record.balanceProfile=next.balanceProfile;this.balanceNote(form);
+  this.editor.record.balanceProfile=next.balanceProfile;this.editor.record.naturalArmor=clone(next.naturalArmor);this.balanceNote(form);
  }
  applyTemplateDraft(collection){
   const form=this.content.querySelector('form'),id=form.elements.templateChoice.value,original=this.editor.record;
@@ -176,6 +195,7 @@ export class UI {
  edit(editor){this.editor={...editor,force:true};this.scroll[this.tab]=0;if(editor.type==='player')this.traits=[...editor.record.traits];this.render();this.content.querySelector('input,select,textarea')?.focus();}
  async action(action,d){
   if(action==='close')return this.close();if(action==='tab')return this.switch(d.tab);
+  if(!this.hub.profileReady()&&!['addTrait','removeTrait','applyCreature','import'].includes(action)){this.render();return;}
   if(action==='more'){const menu=this.root.querySelector('#vh-more');menu.hidden=!menu.hidden;this.root.querySelector('[data-action=more]').setAttribute('aria-expanded',String(!menu.hidden));return;}
   if(action==='cancelEdit'){this.editor=null;this.render();return;}
   if(action==='sync'){await this.work(()=>this.hub.sync(true));return;}
@@ -207,7 +227,7 @@ export class UI {
   if(action==='remove'){this.hub.remove(d.collection,d.id);return;}
   if(action==='addTrait'){
    const picker=this.content.querySelector('#vh-trait-picker'),own=this.content.querySelector('#vh-trait-own'),value=picker.value==='__custom__'?own.value.trim():picker.value;
-   if(value&&!this.traits.includes(value)){this.traits.push(value);this.content.querySelector('#vh-chosen-traits').innerHTML=this.traitHTML();}return;
+   if(value&&!this.traits.includes(value)){this.traits.push(value);this.content.querySelector('#vh-chosen-traits').innerHTML=this.traitHTML();if(this.content.querySelector('[name=noTraits]'))this.content.querySelector('[name=noTraits]').checked=false;}return;
   }
   if(action==='removeTrait'){this.traits.splice(Number(d.index),1);this.content.querySelector('#vh-chosen-traits').innerHTML=this.traitHTML();return;}
   if(['acceptMission','declineMission','continueMission','abandonMission'].includes(action)){
@@ -239,7 +259,7 @@ export class UI {
    if(key==='species'){const form=control.closest('form'),picker=form?.querySelector('[name=balanceProfile]');if(picker){picker.innerHTML=this.creatureOptions(control.value,'');this.balanceNote(form);}}
    if(key==='species'&&this.editor?.type==='player'){
     const config=PROFILES[control.value]||PROFILES.__custom__;
-    for(const [k,values] of Object.entries({affiliation:['',...config.affiliations],role:['',...config.roles],origin:['Не указано',...config.origins],background:['Не указано',...config.backgrounds]})){
+    for(const [k,values] of Object.entries({affiliation:['',...config.affiliations],role:['',...config.roles],origin:['',...config.origins],background:['',...config.backgrounds]})){
      const select=this.content.querySelector(`[name="${k}"]`),old=select.value;select.innerHTML=options(values,values.includes(old)||old==='__custom__'?old:values[0]);
      const wrapper=this.content.querySelector(`[data-own="${k}"]`);wrapper.hidden=select.value!=='__custom__';wrapper.querySelector('input').disabled=wrapper.hidden;
     }
@@ -252,6 +272,7 @@ export class UI {
  }
  async submit(form){
   const data=Object.fromEntries(new FormData(form)),lines=name=>String(data[name]||'').split('\n').map(s=>s.trim()).filter(Boolean),type=form.dataset.form,s=this.hub.state();
+  if(!this.hub.profileReady()&&type!=='player')throw Error('Сначала создайте персонажа.');
   if(await this.worldSubmit(form,data,lines,type,s))return;
   if(await this.campaignSubmit(form,data,lines,type,s))return;
   if(type==='treatment'){const action={kind:data.kind,actorId:data.actorId,targetId:data.targetId,supplyId:data.supplyId};const source=findActor(s,action.actorId),target=findActor(s,action.targetId);return this.sendTactical(`{{user}} выбирает действие «${{heal:'первая помощь',repair:'ремонт',stabilize:'стабилизация'}[action.kind]}»: ${source.name} помогает ${target.name}, используя доступный комплект.`,action);}
@@ -268,9 +289,12 @@ export class UI {
   }
   if(type==='player'){
    const own=k=>data[k]==='__custom__'?String(data[k+'Own']||'').trim():data[k];
-   const player={...this.editor.record,...this.tacticalFormData(form),...Object.fromEntries(['species','affiliation','role','origin','background'].map(k=>[k,own(k)])),traits:[...this.traits],start:data.start,status:data.status,hp:Number(data.hp),maxHp:Number(data.maxHp),rank:data.rank,position:data.position,permissions:lines('permissions'),obligations:data.obligations,stats:Object.fromEntries(Object.keys(STAT_NAMES).map(k=>[k,Number(data[k])])),wounds:JSON.parse(data.wounds),effects:JSON.parse(data.effects),anatomy:JSON.parse(data.anatomy),armor:Object.fromEntries(Object.keys(JSON.parse(data.anatomy)).map(k=>[k,Number(data['protection-'+k])||0])),naturalArmor:Object.fromEntries(Object.keys(JSON.parse(data.anatomy)).map(k=>[k,Number(data['natural-'+k])||0])),weaponIds:lines('weaponIds')};
+   const original=this.editor.record,creating=this.editor.onboarding===true,anatomy=Object.fromEntries(Object.entries(original.anatomy).map(([id,label])=>[id,String(data['anatomy-label-'+id]??label).trim()||label]));
+   const player={...original,...(form.elements.physiology?this.tacticalFormData(form):{}),...Object.fromEntries(['species','affiliation','role','origin','background'].map(k=>[k,own(k)])),name:String(data.name||'').trim(),traits:form.elements.noTraits.checked?[]:[...this.traits],start:data.start,status:data.status,hp:Number(data.hp),maxHp:Number(data.maxHp),rank:data.rank??original.rank,position:data.position??original.position,permissions:form.elements.permissions?lines('permissions'):original.permissions,obligations:data.obligations??original.obligations,stats:Object.fromEntries(Object.keys(STAT_NAMES).map(k=>[k,Number(data[k])])),anatomy,armor:creating?original.armor:Object.fromEntries(Object.keys(anatomy).map(k=>[k,Number(data['protection-'+k])||0])),naturalArmor:creating?original.naturalArmor:Object.fromEntries(Object.keys(anatomy).map(k=>[k,Number(data['natural-'+k])||0])),weaponIds:creating?original.weaponIds:[...form.querySelectorAll('input[name^="weapon-"]:checked')].map(n=>n.value)};
    if(CREATURE_PROFILES.find(p=>p.id===player.balanceProfile)?.species!==player.species)delete player.balanceProfile;
-   if(!player.species)throw Error('Укажите расу / тип существа');validateUpdate({player});this.editor=null;this.hub.update({player});return;
+   validateProfile(player,{noTraits:form.elements.noTraits.checked});validateUpdate({player});
+   if(creating){this.hub.completeProfile(player,{noTraits:form.elements.noTraits.checked});this.editor=null;this.tab='briefing';this.scroll={};this.render();}
+   else{this.editor=null;this.hub.update({player});}return;
   }
   if(type==='navigation'){const navigation={...this.editor.record,...data,routeAuthority:form.elements.routeAuthority.checked,access:lines('access'),ship:JSON.parse(data.ship)};validateUpdate({navigation});this.editor=null;this.hub.update({navigation});return;}
   let record;

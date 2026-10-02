@@ -6,7 +6,7 @@ import {VERSION,actor,ledger,hash,messagePath,addEvent,resolveAttack,replay} fro
 globalThis.document={getElementById:()=>null};
 function setup(){
  const ctx={chatId:'chat-a',characterId:0,chat:[{name:'User',is_user:true,mes:'Стреляю в противника'}],chatMetadata:{voidhub:ledger()},extensionSettings:{voidhub:{enabled:true,autoSync:true,autoRoll:true,reserve:256}},maxContext:50000,getTokenCountAsync:async t=>Math.ceil(t.length/4),saveMetadata:async()=>{},saveChat:async()=>{},setExtensionPrompt:()=>{},getCharacterCardFields:()=>({}),generateRaw:async()=>'{"update":{}}'};
- const hub=new Hub(()=>ctx);const state=ctx.chatMetadata.voidhub.base;state.player.weaponIds=['gun'];state.weapons=[{id:'gun',name:'Оружие',mode:'ranged',damage:'2d10+20',penetration:8,ammo:10,cost:1,type:'энергетический'}];state.enemies=[actor({id:'enemy',name:'Противник',armor:{chest:15}})];state.battle.active=true;
+ const hub=new Hub(()=>ctx);ctx.chatMetadata.voidhub.profileCreated=true;const state=ctx.chatMetadata.voidhub.base;state.player.weaponIds=['gun'];state.weapons=[{id:'gun',name:'Оружие',mode:'ranged',damage:'2d10+20',penetration:8,ammo:10,cost:1,type:'энергетический'}];state.enemies=[actor({id:'enemy',name:'Противник',armor:{chest:15}})];state.battle.active=true;
  const path=messagePath(ctx.chat),key='turn:'+hash(path.join('|')),action={actorId:'player',targetId:'enemy',weaponId:'gun',region:'chest'};let dice=[1,4,7];const result=resolveAttack(state,action,key+':0',()=>dice.shift());
  hub.book.rolls[key]={plan:[action],results:{[result.id]:result}};return {ctx,hub,path,key,result};
 }

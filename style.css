@@ -34,6 +34,13 @@
 #voidhub-window summary{min-height:48px;padding:12px 0;cursor:pointer}
 #voidhub-window summary .vh-meta{display:block;margin-top:4px}
 #voidhub-window .vh-field{display:block;font-weight:500;margin:14px 0}
+#voidhub-window .vh-content .vh-field,#voidhub-window .vh-content .vh-check{color:var(--vh-text)!important}
+#voidhub-window .vh-content h3{color:var(--vh-green)!important}
+#voidhub-window .vh-content input:not([type=checkbox]),#voidhub-window .vh-content select,#voidhub-window .vh-content textarea{background-color:var(--vh-panel)!important;color:var(--vh-text)!important;-webkit-text-fill-color:var(--vh-text)!important;opacity:1}
+#voidhub-window .vh-content select option,#voidhub-window .vh-content select optgroup{background-color:var(--vh-panel);color:var(--vh-text)}
+#voidhub-window .vh-creation-footer{flex-shrink:0;padding:12px 18px;padding-bottom:max(12px,env(safe-area-inset-bottom,0px));background:var(--vh-panel);border-top:1px solid var(--vh-line)}
+#voidhub-window .vh-creation-footer .vh-button{width:100%;background:var(--vh-green);color:var(--vh-bg);min-height:48px}
+#voidhub-window.vh-creating .vh-brand:disabled{opacity:1;cursor:default}
 #voidhub-window input:not([type=checkbox]),#voidhub-window select,#voidhub-window textarea{display:block;margin-top:7px;width:100%;min-width:0;min-height:46px;border:1px solid var(--vh-line);border-radius:4px;background:var(--vh-panel);color:var(--vh-text);padding:10px 12px;font:400 var(--vh-font-size)/1.6 Jura,sans-serif}
 #voidhub-window textarea{resize:vertical}
 #voidhub-window input[type=checkbox]{width:20px;height:20px;flex-shrink:0;accent-color:var(--vh-green)}

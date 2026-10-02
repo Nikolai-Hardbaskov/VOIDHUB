@@ -2,7 +2,7 @@ import {normalWorldRecord,knownThreats,withoutProposal} from './world-data.js';
 import {normalCampaignRecord,visibleMemories} from './campaign-data.js';
 import {EFFECT_TEMPLATES,normalizeEffect,blocked,effectModifiers,incomingModifiers,effectiveStat,shieldImpact,applyShieldUses} from './effects.js';
 // Pure game rules and replay. No SillyTavern or DOM dependencies.
-export const VERSION = '0.5.1';
+export const VERSION = '0.6.0';
 export const STAT_NAMES = {ranged:'Стрельба',melee:'Ближний бой',strength:'Сила',toughness:'Стойкость',reaction:'Реакция',will:'Воля'};
 export const REGIONS = {head:'Голова',chest:'Грудная клетка',abdomen:'Живот',rightArm:'Правая рука',leftArm:'Левая рука',rightLeg:'Правая нога',leftLeg:'Левая нога'};
 export const COLLECTIONS = ['missions','feed','squad','enemies','weapons','armor','inventory','resources','reputation','archive','channels','abilities','routes','journeys','careerEvents','memories','relationships','offers','transactions','threats'];
@@ -17,7 +17,7 @@ export function actor(overrides={}){
 }
 export function initialState(){return {player:actor(),missions:[],feed:[],squad:[],enemies:[],weapons:[],armor:[],inventory:[],resources:[],reputation:[],archive:[],channels:[],abilities:[],routes:[],journeys:[],careerEvents:[],memories:[],relationships:[],offers:[],transactions:[],threats:[],scene:{location:'Не определено',presentIds:['player'],confirmed:false},
  navigation:{location:'Не определено',transport:'Не определено',relationship:'Не определено',access:[],route:'',ship:null,routeId:null,journeyId:null,routeAuthority:false},battle:{active:false,round:1,notes:'',order:[]}};}
-export function ledger(){return {schema:1,version:VERSION,base:initialState(),events:[],rolls:{},sequence:0};}
+export function ledger(){return {schema:1,version:VERSION,profileCreated:false,profileStarted:false,base:initialState(),events:[],rolls:{},sequence:0};}
 export function messagePath(chat){return chat.map((message,index)=>{
  message.extra ??= {};message.extra.voidhub ??= {};message.extra.voidhub.uid ??= uid();
  return `${message.extra.voidhub.uid}:${hash(`${message.is_user?'user':'assistant'}:${message.name}:${message.mes}`)}`;
@@ -151,6 +151,7 @@ export function validateLedger(input){
   if(e.kind==='update')validateUpdate(e.payload);if(e.kind==='mechanic')validateUpdate(e.payload.patch);if(e.kind==='replace')validateState(e.payload);
   return safeValue(e);
  });
+ result.profileCreated=input.profileCreated===true;result.profileStarted=input.profileStarted===true;
  result.rolls=safeValue(input.rolls||{});result.sequence=Math.max(Number(input.sequence)||0,...result.events.map(e=>Number(e.seq)||0));return result;
 }
 export function resolveAttack(state,action,id,die=randomDie){

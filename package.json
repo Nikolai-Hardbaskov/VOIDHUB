@@ -1,1 +1,1 @@
-{"name":"voidhub","version":"0.5.1","private":true,"type":"module","scripts":{"test":"node --test tests/*.test.js"}}
+{"name":"voidhub","version":"0.6.0","private":true,"type":"module","scripts":{"test":"node --test tests/*.test.js"}}
